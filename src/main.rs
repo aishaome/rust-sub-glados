@@ -1,47 +1,76 @@
+mod cookies;
 mod glados;
 mod mail;
 mod notify;
 
 use anyhow::{Context, Result};
+use cookies::CookieFile;
 use glados::Glados;
 use mail::Mailbox;
-use notify::WeCom;
 use std::env;
 use std::time::Duration;
 
 const CODE_TIMEOUT: Duration = Duration::from_secs(180);
 
-fn run_account(mailbox: &mut Mailbox, email: &str) -> Result<glados::CheckinReport> {
-    let glados = Glados::new(email)?;
+/// 收驗證碼用的郵箱，需要郵箱登入時才連線
+struct MailAccount {
+    user: String,
+    pass: String,
+    conn: Option<Mailbox>,
+}
 
-    // 1. 記下目前最新 UID，再請 GLaDOS 寄驗證碼，只讀之後新到的信
+impl MailAccount {
+    fn mailbox(&mut self) -> Result<&mut Mailbox> {
+        if self.conn.is_none() {
+            self.conn = Some(Mailbox::connect(&self.user, &self.pass)?);
+        }
+        Ok(self.conn.as_mut().expect("connected"))
+    }
+}
+
+fn run_account(mail: &mut MailAccount, cookies: &mut CookieFile, email: &str) -> Result<glados::CheckinReport> {
+    // 1. 先用保存的 cookie，仍有效就直接簽到
+    if let Some(saved) = cookies.get(email) {
+        let glados = Glados::new(email, Some(saved))?;
+        if glados.is_logged_in() {
+            println!("[{email}] cookie 有效，执行签到…");
+            let report = glados.checkin()?;
+            cookies.set(email, glados.export_cookie())?;
+            return Ok(report);
+        }
+        println!("[{email}] cookie 已失效，改用邮箱登录");
+    }
+
+    // 2. 記下目前最新 UID，再請 GLaDOS 寄驗證碼，只讀之後新到的信
+    let glados = Glados::new(email, None)?;
+    let mailbox = mail.mailbox()?;
     let after_uid = mailbox.latest_uid()?;
     println!("[{email}] 请求发送验证码…");
     glados.request_code(email)?;
 
-    // 2. 從 QQ 郵箱讀取驗證碼
+    // 3. 從郵箱讀取驗證碼
     println!("[{email}] 等待验证码邮件…");
     let code = mailbox.wait_glados_code(email, after_uid, CODE_TIMEOUT)?;
-    println!("[{email}] 获取验证码 {code}，模拟登录…");
+    println!("[{email}] 已获取验证码，模拟登录…");
 
-    // 3. 登入，接著用同一個 session 簽到
+    // 4. 登入後保存 cookie，接著用同一個 session 簽到
     glados.login(email, &code)?;
-    println!("[{email}] 登录成功，执行签到…");
+    cookies.set(email, glados.export_cookie())?;
+    println!("[{email}] 登录成功，已保存 cookie，执行签到…");
     glados.checkin()
 }
 
 fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
 
-    // cargo run -- --test-push：只发送一则示例通知，不请求 GLaDOS
+    // cargo run -- --test-push：只向所有通知通道发送一则示例，不请求 GLaDOS
     if env::args().any(|a| a == "--test-push") {
-        let wecom = WeCom::from_env()?.context("企业微信配置不完整 (CORP_ID / SECRET / AGENT_ID)")?;
-        wecom.send_text(
-            "GLaDOS 签到  成功:1  失败:0  重复:0（测试推送）",
-            "example@qq.com\n状态: 签到成功 (+18 积分): Checkin! Got 18 Points\n剩余: 14 天  总积分: 18 积分\n兑换: 未兑换 (需 500 积分，差 482)",
-        )?;
-        println!("企业微信测试推送成功");
-        return Ok(());
+        return notify::send_all(
+            "GLaDOS 签到  成功:1  失败:1  重复:1（测试推送）",
+            "example@qq.com\n状态: 签到成功 (+18 积分): Checkin! Got 18 Points\n剩余: 14 天  总积分: 18 积分\n兑换: 未兑换 (需 500 积分，差 482)\n\n\
+             example@foxmail.com\n状态: 重复签到: Today's observation logged.\n剩余: 118 天  总积分: 195 积分\n兑换: 未兑换 (需 500 积分，差 305)\n\n\
+             example@163.com\n状态: 失败: GLaDOS 要求人机验证 (Turnstile)",
+        );
     }
     // MAIL_ACCOUNTS=帳號:授權碼,帳號:授權碼
     let mail_accounts: Vec<(String, String)> = env::var("MAIL_ACCOUNTS")
@@ -57,11 +86,12 @@ fn main() -> Result<()> {
         .filter(|s| !s.is_empty())
         .collect();
 
-    let mut mailboxes = Vec::new();
-    for (user, pass) in &mail_accounts {
-        mailboxes.push(Mailbox::connect(user, pass)?);
-    }
+    let mut mailboxes: Vec<MailAccount> = mail_accounts
+        .into_iter()
+        .map(|(user, pass)| MailAccount { user: user.to_lowercase(), pass, conn: None })
+        .collect();
     anyhow::ensure!(!mailboxes.is_empty(), "MAIL_ACCOUNTS 中没有有效的邮箱");
+    let mut cookies = CookieFile::load();
     let mut summary = Vec::new();
     let (mut ok, mut repeat, mut fail) = (0, 0, 0);
 
@@ -72,7 +102,7 @@ fn main() -> Result<()> {
             .iter()
             .position(|m| m.user == email.to_lowercase())
             .unwrap_or(0);
-        match run_account(&mut mailboxes[idx], email) {
+        match run_account(&mut mailboxes[idx], &mut cookies, email) {
             Ok(r) => {
                 println!("[{email}] {} | 剩余 {} | 总 {} | {}\n", r.status, r.left_days, r.points_total, r.exchange);
                 match r.status.split(' ').next().unwrap_or_default().trim_end_matches(':') {
@@ -93,19 +123,12 @@ fn main() -> Result<()> {
         }
     }
 
-    for mailbox in mailboxes {
+    for mailbox in mailboxes.into_iter().filter_map(|m| m.conn) {
         mailbox.logout()?;
     }
     let title = format!("GLaDOS 签到  成功:{ok}  失败:{fail}  重复:{repeat}");
     let content = summary.join("\n\n");
     println!("========== 签到总结 ==========\n{title}\n{content}\n");
 
-    match WeCom::from_env()? {
-        Some(wecom) => match wecom.send_text(&title, &content) {
-            Ok(()) => println!("企业微信推送成功"),
-            Err(e) => println!("企业微信推送失败: {e:#}"),
-        },
-        None => println!("企业微信配置不完整 (CORP_ID / SECRET / AGENT_ID)，跳过推送"),
-    }
-    Ok(())
+    notify::send_all(&title, &content)
 }

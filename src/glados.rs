@@ -1,8 +1,10 @@
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
+use reqwest::cookie::{CookieStore, Jar};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, ORIGIN, REFERER};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use std::time::Duration;
 
 const DOMAIN: &str = "glados.cloud";
@@ -12,6 +14,7 @@ const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleW
 
 pub struct Glados {
     client: Client,
+    jar: Arc<Jar>,
 }
 
 /// 積分達到此值時自動兌換 plan500（100 天）
@@ -37,8 +40,20 @@ fn url(path: &str) -> String {
     format!("https://{DOMAIN}/api{path}")
 }
 
+fn base_url() -> reqwest::Url {
+    format!("https://{DOMAIN}/").parse().expect("valid url")
+}
+
 impl Glados {
-    pub fn new(email: &str) -> Result<Self> {
+    /// `saved_cookie` 為之前登入保存的 cookie（`k=v; k2=v2`），有的話直接帶入
+    pub fn new(email: &str, saved_cookie: Option<&str>) -> Result<Self> {
+        let jar = Arc::new(Jar::default());
+        if let Some(cookie) = saved_cookie {
+            for pair in cookie.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+                jar.add_cookie_str(&format!("{pair}; Domain={DOMAIN}; Path=/"), &base_url());
+            }
+        }
+
         let mut headers = HeaderMap::new();
         headers.insert(ORIGIN, HeaderValue::from_str(&format!("https://{DOMAIN}"))?);
         headers.insert(REFERER, HeaderValue::from_str(&format!("https://{DOMAIN}/login"))?);
@@ -46,10 +61,21 @@ impl Glados {
         let client = Client::builder()
             .user_agent(USER_AGENT)
             .default_headers(headers)
-            .cookie_store(true)
+            .cookie_provider(jar.clone())
             .timeout(Duration::from_secs(60))
             .build()?;
-        Ok(Self { client })
+        Ok(Self { client, jar })
+    }
+
+    /// 匯出目前 session 的 cookie，供下次直接使用
+    pub fn export_cookie(&self) -> Option<String> {
+        self.jar.cookies(&base_url()).and_then(|v| v.to_str().ok().map(String::from))
+    }
+
+    /// cookie 是否仍有效：能查詢到剩餘天數即視為已登入
+    pub fn is_logged_in(&self) -> bool {
+        self.get("/user/status")
+            .is_ok_and(|s| s["code"].as_i64() == Some(0) && !s["data"]["leftDays"].is_null())
     }
 
     fn post(&self, path: &str, body: Value) -> Result<Value> {

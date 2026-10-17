@@ -33,7 +33,6 @@ fn read_line(stream: &mut impl Read) -> Result<String> {
 }
 
 pub struct Mailbox {
-    pub user: String,
     session: imap::Session<TlsStream<TcpStream>>,
 }
 
@@ -65,7 +64,7 @@ impl Mailbox {
             .login(user, pass)
             .map_err(|(e, _)| e)
             .with_context(|| format!("{user} IMAP 登录失败：请确认已开启 IMAP 服务并使用授权码"))?;
-        Ok(Self { user: user.to_lowercase(), session })
+        Ok(Self { session })
     }
 
     /// 目前 INBOX 中最大的 UID，用來只看之後新到的郵件

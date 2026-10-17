@@ -80,9 +80,29 @@ jobs:
           echo "延迟 $((delay / 60)) 分 $((delay % 60)) 秒"
           sleep "$delay"
 
+      # 恢复上次保存的 GLaDOS cookie（cache 不可覆盖，按前缀取最新一份）
+      # 从 secret GLADOS_COOKIES 取出上次保存的 cookie，并留一份原值用于比对
+      - name: Restore cookies
+        if: steps.decide.outputs.run == 'true'
+        env:
+          GLADOS_COOKIES: ${{ secrets.GLADOS_COOKIES }}
+        run: |
+          if [ -n "$GLADOS_COOKIES" ]; then
+            printf '%s' "$GLADOS_COOKIES" > glados-cookies.json
+            cp glados-cookies.json "$RUNNER_TEMP/cookies-orig.json"
+            echo "已从 secret 恢复 cookie"
+          else
+            echo "secret GLADOS_COOKIES 为空，将使用邮箱登录"
+          fi
+
+      # 公开仓库的日志所有人可见：逐个遮蔽邮箱与授权码（secret 只会整串遮蔽）
       - name: Checkin
         if: steps.decide.outputs.run == 'true'
-        run: ./target/release/email
+        run: |
+          for item in ${GLADOS_EMAILS//,/ } ${MAIL_ACCOUNTS//[,:]/ }; do
+            echo "::add-mask::$item"
+          done
+          ./target/release/email
         env:
           MAIL_ACCOUNTS: ${{ secrets.MAIL_ACCOUNTS }}
           GLADOS_EMAILS: ${{ secrets.GLADOS_EMAILS }}
@@ -90,6 +110,23 @@ jobs:
           SECRET: ${{ secrets.SECRET }}
           AGENT_ID: ${{ secrets.AGENT_ID }}
           TOUSER: ${{ secrets.TOUSER }}
+          MAIL_NOTIFY_URL: ${{ secrets.MAIL_NOTIFY_URL }}
+          MAIL_NOTIFY_TOKEN: ${{ secrets.MAIL_NOTIFY_TOKEN }}
+
+      # cookie 有变化时写回 secret（需要有 Secrets 写权限的 PAT，存为 secret GH_PAT）
+      - name: Save cookies
+        if: always() && steps.decide.outputs.run == 'true' && hashFiles('glados-cookies.json') != ''
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if cmp -s glados-cookies.json "$RUNNER_TEMP/cookies-orig.json"; then
+            echo "cookie 未变化，无需更新 secret"
+          elif [ -z "$GH_TOKEN" ]; then
+            echo "::warning::未配置 secret GH_PAT，cookie 无法保存，下次将重新邮箱登录"
+          else
+            gh secret set GLADOS_COOKIES --repo "$GITHUB_REPOSITORY" < glados-cookies.json
+            echo "已更新 secret GLADOS_COOKIES"
+          fi
 
       - name: Create done marker
         if: steps.decide.outputs.run == 'true'

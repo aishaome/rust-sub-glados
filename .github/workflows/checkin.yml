@@ -2,18 +2,12 @@ name: GLaDOS checkin
 
 on:
   workflow_dispatch:
-    inputs:
-      force:
-        description: "立即签到（忽略随机与今日已签到标记）"
-        type: boolean
-        default: true
   schedule:
-    # UTC 00:23 ~ 11:23 每小时一次，即北京时间 08:23 ~ 19:23
-    - cron: "23 0-11 * * *"
+    # UTC 02:00 每天一次，即北京时间 10:00，之后再随机延迟 0 ~ 4 小时，签到时间落在 10:00 ~ 14:00 之间
+    - cron: "0 2 * * *"
 
 permissions:
   contents: read
-  actions: write
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -22,68 +16,31 @@ env:
 jobs:
   checkin:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 300
     steps:
-      - name: Today
-        id: today
-        run: echo "date=$(date +%Y%m%d)" >> "$GITHUB_OUTPUT"
-
-      # 今日已签到的标记（只查是否存在，不下载）
-      - name: Check done marker
-        id: marker
-        uses: actions/cache/restore@v4
-        with:
-          path: .checkin-done
-          key: checkin-done-${{ steps.today.outputs.date }}
-          lookup-only: true
-
-      # 每次以 1/剩余次数 的概率执行，最后一次（19 点）必定执行，
-      # 因此签到时间在 8 ~ 20 点之间均匀随机，且漏跑的排程会由后续补上
-      - name: Decide
-        id: decide
+      # 定时触发时随机延迟 0 ~ 4 小时（10:00 起算，最晚 14:00 前完成）；手动触发立即执行
+      - name: Random delay
+        if: github.event_name == 'schedule'
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" = "true" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"; echo "手动触发，立即签到"; exit 0
-          fi
-          if [ "${{ steps.marker.outputs.cache-hit }}" = "true" ]; then
-            echo "run=false" >> "$GITHUB_OUTPUT"; echo "今日已签到，跳过"; exit 0
-          fi
-          hour=$((10#$(date +%H)))
-          remaining=$((20 - hour))
-          if [ "$remaining" -le 1 ] || [ $((RANDOM % remaining)) -eq 0 ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"; echo "北京时间 ${hour} 点：本次执行签到"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"; echo "北京时间 ${hour} 点：本次跳过（概率 1/${remaining}）"
-          fi
+          delay=$((RANDOM % 14400))
+          echo "延迟 $((delay / 3600)) 时 $((delay % 3600 / 60)) 分 $((delay % 60)) 秒"
+          sleep "$delay"
 
       - name: Checkout
-        if: steps.decide.outputs.run == 'true'
         uses: actions/checkout@v6
 
       - name: Set up Rust
-        if: steps.decide.outputs.run == 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Rust cache
-        if: steps.decide.outputs.run == 'true'
         uses: Swatinem/rust-cache@v2
 
       - name: Build
-        if: steps.decide.outputs.run == 'true'
         run: cargo build --release
-
-      # 随机延迟 0 ~ 30 分钟（最晚 19:23 的排程也能在 20 点前完成），让签到时间精确到分钟也随机
-      - name: Random delay
-        if: steps.decide.outputs.run == 'true' && github.event_name == 'schedule'
-        run: |
-          delay=$((RANDOM % 1800))
-          echo "延迟 $((delay / 60)) 分 $((delay % 60)) 秒"
-          sleep "$delay"
 
       # 恢复上次保存的 GLaDOS cookie（cache 不可覆盖，按前缀取最新一份）
       # 从 secret GLADOS_COOKIES 取出上次保存的 cookie，并留一份原值用于比对
       - name: Restore cookies
-        if: steps.decide.outputs.run == 'true'
         env:
           GLADOS_COOKIES: ${{ secrets.GLADOS_COOKIES }}
         run: |
@@ -96,8 +53,8 @@ jobs:
           fi
 
       # 公开仓库的日志所有人可见：逐个遮蔽邮箱与授权码（secret 只会整串遮蔽）
+      # 每个账号是否已签到由程序读取积分历史判断，已签到则不再提交签到请求
       - name: Checkin
-        if: steps.decide.outputs.run == 'true'
         run: |
           for item in ${GLADOS_EMAILS//,/ } ${MAIL_ACCOUNTS//[,:]/ }; do
             echo "::add-mask::$item"
@@ -115,7 +72,7 @@ jobs:
 
       # cookie 有变化时写回 secret（需要有 Secrets 写权限的 PAT，存为 secret GH_PAT）
       - name: Save cookies
-        if: always() && steps.decide.outputs.run == 'true' && hashFiles('glados-cookies.json') != ''
+        if: always() && hashFiles('glados-cookies.json') != ''
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
@@ -127,14 +84,3 @@ jobs:
             gh secret set GLADOS_COOKIES --repo "$GITHUB_REPOSITORY" < glados-cookies.json
             echo "已更新 secret GLADOS_COOKIES"
           fi
-
-      - name: Create done marker
-        if: steps.decide.outputs.run == 'true'
-        run: touch .checkin-done
-
-      - name: Save done marker
-        if: steps.decide.outputs.run == 'true' && steps.marker.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: .checkin-done
-          key: checkin-done-${{ steps.today.outputs.date }}

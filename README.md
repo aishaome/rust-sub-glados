@@ -56,7 +56,7 @@ cargo run -- --test-push   # 只向所有通知通道发送一条测试推送
 - QQ 邮箱的英文别名、Foxmail、QQ 号邮箱都收在同一个信箱，`MAIL_ACCOUNTS` 填其中一个即可。
 - 企业微信自建应用需在「企业可信 IP」中加入调用来源 IP；GitHub Actions 的 IP 不固定，若推送报 `60020 not allow to access from your ip`，需改用固定 IP 的代理或在本地运行。
 
-`.github/workflows/checkin.yml` 在北京时间 8 ~ 19 点每小时触发一次，每次以「1 / 剩余次数」的概率执行，最后一次必定执行，再随机延迟 0 ~ 30 分钟，因此签到时间在 8 ~ 20 点之间随机；当天签到后以 cache 标记，后续触发直接跳过。
+`.github/workflows/checkin.yml` 每天北京时间 10:00 触发一次，随机延迟 0 ~ 4 小时后执行，因此签到时间在 10:00 ~ 14:00 之间随机。每个账号执行前会读取积分历史，判断今日是否已签到，已签到则不再提交签到请求。
 
 cookie 保存在 secret `GLADOS_COOKIES`：运行前写入 `glados-cookies.json`，运行后若 cookie 有变化，用 `GH_PAT` 写回 secret。
 

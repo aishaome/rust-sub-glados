@@ -17,9 +17,15 @@ pub struct Glados {
     jar: Arc<Jar>,
 }
 
-/// 積分達到此值時自動兌換 plan500（100 天）
-const EXCHANGE_PLAN: &str = "plan500";
-const EXCHANGE_POINTS: i64 = 500;
+/// 剩余天数低于此值时才自动兑换
+const LOW_DAYS_THRESHOLD: f64 = 5.0;
+/// 兑换套餐 (planType, 所需积分, 兑换天数)，按天数从大到小排列
+const EXCHANGE_PLANS: [(&str, i64, i64); 3] = [("plan500", 500, 100), ("plan200", 200, 30), ("plan100", 100, 10)];
+
+/// 返回当前积分能兑换的天数最多的套餐
+fn pick_plan(points: i64) -> Option<(&'static str, i64, i64)> {
+    EXCHANGE_PLANS.iter().copied().find(|&(_, cost, _)| points >= cost)
+}
 
 pub struct CheckinReport {
     pub left_days: String,
@@ -158,15 +164,14 @@ impl Glados {
         Ok(())
     }
 
-    /// 查詢狀態 → 查詢積分歷史判斷今天是否已簽到 → 未簽到才執行簽到 → 查詢積分 → 積分足夠時兌換
+    /// 查詢狀態 → 查詢積分歷史判斷今天是否已簽到 → 未簽到才執行簽到 → 查詢積分 → 剩餘天數低於 5 天時兌換當前積分可換的最大天數
     pub fn checkin(&self) -> Result<CheckinReport> {
         let status = self.get("/user/status")?;
-        let left_days = status["data"]["leftDays"]
+        let left_days_num = status["data"]["leftDays"]
             .as_str()
             .and_then(|s| s.parse::<f64>().ok())
-            .or_else(|| status["data"]["leftDays"].as_f64())
-            .map(|d| format!("{} 天", d as i64))
-            .unwrap_or_else(|| "None 天".into());
+            .or_else(|| status["data"]["leftDays"].as_f64());
+        let left_days = left_days_num.map_or_else(|| "None 天".into(), |d| format!("{} 天", d as i64));
 
         let before = self.get("/user/points")?;
         let status = if checked_in_today(&before, &today_cn()) {
@@ -189,19 +194,25 @@ impl Glados {
             .map(|p| p as i64);
         let points_total = points_num.map_or_else(|| "None 积分".into(), |p| format!("{p} 积分"));
 
-        let exchange = match points_num {
-            Some(p) if p >= EXCHANGE_POINTS => self.exchange(),
-            Some(p) => format!("未兑换 (需 {EXCHANGE_POINTS} 积分，差 {})", EXCHANGE_POINTS - p),
-            None => "未兑换 (无法获取积分)".into(),
+        let exchange = match (left_days_num, points_num) {
+            (Some(d), Some(p)) if d < LOW_DAYS_THRESHOLD => match pick_plan(p) {
+                Some((plan, _, days)) => self.exchange(plan, days),
+                None => {
+                    let (_, cost, _) = EXCHANGE_PLANS[EXCHANGE_PLANS.len() - 1];
+                    format!("未兑换 (剩余 {} 天，积分不足，需 {cost} 积分起，差 {})", d as i64, cost - p)
+                }
+            },
+            (Some(d), Some(_)) => format!("未兑换 (剩余 {} 天，未低于 {LOW_DAYS_THRESHOLD} 天)", d as i64),
+            _ => "未兑换 (无法获取积分或剩余天数)".into(),
         };
 
         Ok(CheckinReport { left_days, status, points_total, exchange })
     }
 
-    /// 兌換 100 天會員；失敗只記錄在結果中，不影響簽到
-    fn exchange(&self) -> String {
-        match self.post("/user/exchange", json!({ "planType": EXCHANGE_PLAN })) {
-            Ok(data) if data["code"].as_i64() == Some(0) => format!("兑换成功: {EXCHANGE_PLAN} (100 天)"),
+    /// 兌換指定套餐；失敗只記錄在結果中，不影響簽到
+    fn exchange(&self, plan: &str, days: i64) -> String {
+        match self.post("/user/exchange", json!({ "planType": plan })) {
+            Ok(data) if data["code"].as_i64() == Some(0) => format!("兑换成功: {plan} ({days} 天)"),
             Ok(data) => format!("兑换失败: {}", data["message"].as_str().unwrap_or("未知错误")),
             Err(e) => format!("兑换失败: {e:#}"),
         }
@@ -220,6 +231,17 @@ mod tests {
         // UTC 2026-10-19T15:59:59Z 即北京时间 2026-10-19 23:59:59，仍是 10-19
         assert_eq!(cn_date_of(1_792_425_599), "2026-10-19");
         assert_eq!(cn_date_of(1_792_425_600), "2026-10-20");
+    }
+
+    #[test]
+    fn picks_largest_affordable_plan() {
+        assert_eq!(pick_plan(99), None);
+        assert_eq!(pick_plan(100).map(|p| p.2), Some(10));
+        assert_eq!(pick_plan(199).map(|p| p.2), Some(10));
+        assert_eq!(pick_plan(200).map(|p| p.2), Some(30));
+        assert_eq!(pick_plan(499).map(|p| p.2), Some(30));
+        assert_eq!(pick_plan(500).map(|p| p.0), Some("plan500"));
+        assert_eq!(pick_plan(1200).map(|p| p.2), Some(100));
     }
 
     #[test]

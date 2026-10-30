@@ -32,8 +32,24 @@ pub struct CheckinReport {
     pub status: String,
     pub points_total: String,
     pub exchange: String,
+    /// 本月已用流量 / 套餐总流量
+    pub traffic: String,
     /// 今日已签到（含本次签到成功、今日已签到）时才有值，供通知附带订阅地址
     pub subscriptions: Vec<(&'static str, String)>,
+}
+
+/// vip 等级 → 每月流量额度 (GB)，与控制台前端一致；找不到时按等级 0 (10 GB)
+const TRAFFIC_QUOTA_GB: [(i64, i64); 7] = [(0, 10), (10, 10), (11, 100), (21, 200), (31, 500), (41, 2000), (51, 5000)];
+
+/// 由 /user/status 的 traffic（本月已用字节）与 vip 等级生成 “已用 / 总量” 文字
+fn traffic_text(data: &Value) -> String {
+    let Some(used) = data["traffic"].as_f64().or_else(|| data["traffic"].as_str()?.parse().ok()) else {
+        return "None".into();
+    };
+    let vip = data["vip"].as_i64().or_else(|| data["vip"].as_str()?.parse().ok()).unwrap_or(0);
+    let quota = TRAFFIC_QUOTA_GB.iter().find(|(v, _)| *v == vip).unwrap_or(&TRAFFIC_QUOTA_GB[0]).1;
+    const GB: f64 = 1_073_741_824.0;
+    format!("{:.2} GB / {quota} GB", used / GB)
 }
 
 /// 由 /user/status 的 configureId / code / port / hashed 拼出控制台订阅页的各客户端地址
@@ -187,6 +203,7 @@ impl Glados {
     pub fn checkin(&self) -> Result<CheckinReport> {
         let status = self.get("/user/status")?;
         let subscriptions_all = subscription_urls(&status["data"]);
+        let traffic = traffic_text(&status["data"]);
         let left_days_num = status["data"]["leftDays"]
             .as_str()
             .and_then(|s| s.parse::<f64>().ok())
@@ -227,7 +244,7 @@ impl Glados {
             _ => "未兑换 (无法获取积分或剩余天数)".into(),
         };
 
-        Ok(CheckinReport { left_days, status, points_total, exchange, subscriptions })
+        Ok(CheckinReport { left_days, status, points_total, exchange, traffic, subscriptions })
     }
 
     /// 兌換指定套餐；失敗只記錄在結果中，不影響簽到
@@ -263,6 +280,15 @@ mod tests {
         assert_eq!(get("Singbox"), Some("https://update.glados-config.com/singbox/1001/bbbbbbbbbbbbbbbb"));
         assert_eq!(urls.len(), 2);
         assert!(subscription_urls(&json!({ "configureId": 1 })).is_empty());
+    }
+
+    #[test]
+    fn formats_traffic_usage() {
+        let gb = 1_073_741_824i64;
+        let data = json!({ "traffic": 5 * gb, "vip": 11 });
+        assert_eq!(traffic_text(&data), "5.00 GB / 100 GB");
+        assert_eq!(traffic_text(&json!({ "traffic": 1536 * 1024 * 1024i64, "vip": "0" })), "1.50 GB / 10 GB");
+        assert_eq!(traffic_text(&json!({ "vip": 11 })), "None");
     }
 
     #[test]

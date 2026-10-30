@@ -112,8 +112,8 @@ fn main() -> Result<()> {
                     _ => fail += 1,
                 }
                 let base = format!(
-                    "{email}\n状态: {}\n剩余: {}  总积分: {}\n兑换: {}",
-                    r.status, r.left_days, r.points_total, r.exchange
+                    "{email}\n状态: {}\n剩余: {}  总积分: {}\n流量: {}\n兑换: {}",
+                    r.status, r.left_days, r.points_total, r.traffic, r.exchange
                 );
                 summary.push(base.clone());
                 // 订阅地址含个人配置，只放进通知（企业微信 / 邮件），不写入标准输出（公开仓库的 Actions 日志）

@@ -93,6 +93,7 @@ fn main() -> Result<()> {
     anyhow::ensure!(!mailboxes.is_empty(), "MAIL_ACCOUNTS 中没有有效的邮箱");
     let mut cookies = CookieFile::load();
     let mut summary = Vec::new();
+    let mut notify_summary = Vec::new();
     let (mut ok, mut repeat, mut fail) = (0, 0, 0);
 
     // 依序處理，避免多封驗證碼同時到達時混淆
@@ -110,15 +111,26 @@ fn main() -> Result<()> {
                     "重复签到" => repeat += 1,
                     _ => fail += 1,
                 }
-                summary.push(format!(
+                let base = format!(
                     "{email}\n状态: {}\n剩余: {}  总积分: {}\n兑换: {}",
                     r.status, r.left_days, r.points_total, r.exchange
-                ));
+                );
+                summary.push(base.clone());
+                // 订阅地址含个人配置，只放进通知（企业微信 / 邮件），不写入标准输出（公开仓库的 Actions 日志）
+                let mut with_subs = base;
+                if !r.subscriptions.is_empty() {
+                    with_subs.push_str("\n订阅地址:");
+                    for (name, url) in &r.subscriptions {
+                        with_subs.push_str(&format!("\n{name}: {url}"));
+                    }
+                }
+                notify_summary.push(with_subs);
             }
             Err(e) => {
                 println!("[{email}] 失败: {e:#}\n");
                 fail += 1;
                 summary.push(format!("{email}\n状态: 失败: {e:#}"));
+                notify_summary.push(format!("{email}\n状态: 失败: {e:#}"));
             }
         }
     }
@@ -130,5 +142,5 @@ fn main() -> Result<()> {
     let content = summary.join("\n\n");
     println!("========== 签到总结 ==========\n{title}\n{content}\n");
 
-    notify::send_all(&title, &content)
+    notify::send_all(&title, &notify_summary.join("\n\n"))
 }

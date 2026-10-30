@@ -32,6 +32,25 @@ pub struct CheckinReport {
     pub status: String,
     pub points_total: String,
     pub exchange: String,
+    /// 今日已签到（含本次签到成功、今日已签到）时才有值，供通知附带订阅地址
+    pub subscriptions: Vec<(&'static str, String)>,
+}
+
+/// 由 /user/status 的 configureId / code / port / hashed 拼出控制台订阅页的各客户端地址
+fn subscription_urls(data: &Value) -> Vec<(&'static str, String)> {
+    let text = |k: &str| match &data[k] {
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    };
+    let (Some(s), Some(i), Some(n), Some(c)) = (text("configureId"), text("code"), text("port"), text("hashed")) else {
+        return Vec::new();
+    };
+    const D: &str = "https://update.glados-config.com";
+    vec![
+        ("Mihomo / Clash Meta", format!("{D}/mihomo/{s}/{i}/{n}/glados.yaml")),
+        ("Singbox", format!("{D}/singbox/{s}/{c}")),
+    ]
 }
 
 /// 網頁端會在每個請求帶 `Authorization: fp1.<48 hex>` 的裝置指紋，
@@ -167,6 +186,7 @@ impl Glados {
     /// 查詢狀態 → 查詢積分歷史判斷今天是否已簽到 → 未簽到才執行簽到 → 查詢積分 → 剩餘天數低於 5 天時兌換當前積分可換的最大天數
     pub fn checkin(&self) -> Result<CheckinReport> {
         let status = self.get("/user/status")?;
+        let subscriptions_all = subscription_urls(&status["data"]);
         let left_days_num = status["data"]["leftDays"]
             .as_str()
             .and_then(|s| s.parse::<f64>().ok())
@@ -174,17 +194,18 @@ impl Glados {
         let left_days = left_days_num.map_or_else(|| "None 天".into(), |d| format!("{} 天", d as i64));
 
         let before = self.get("/user/points")?;
-        let status = if checked_in_today(&before, &today_cn()) {
-            "重复签到: 今日已签到（签到前检查，未重复提交）".to_string()
+        let (status, signed_in) = if checked_in_today(&before, &today_cn()) {
+            ("重复签到: 今日已签到（签到前检查，未重复提交）".to_string(), true)
         } else {
             let data = self.post("/user/checkin", json!({ "token": DOMAIN }))?;
             let message = data["message"].as_str().unwrap_or("无消息字段");
             match data["code"].as_i64() {
-                Some(0) => format!("签到成功 (+{} 积分): {message}", data["points"]),
-                Some(1) => format!("重复签到: {message}"),
-                _ => format!("签到失败: {message}"),
+                Some(0) => (format!("签到成功 (+{} 积分): {message}", data["points"]), true),
+                Some(1) => (format!("重复签到: {message}"), true),
+                _ => (format!("签到失败: {message}"), false),
             }
         };
+        let subscriptions = if signed_in { subscriptions_all } else { Vec::new() };
 
         let points = self.get("/user/points")?;
         let points_num = points["points"]
@@ -206,7 +227,7 @@ impl Glados {
             _ => "未兑换 (无法获取积分或剩余天数)".into(),
         };
 
-        Ok(CheckinReport { left_days, status, points_total, exchange })
+        Ok(CheckinReport { left_days, status, points_total, exchange, subscriptions })
     }
 
     /// 兌換指定套餐；失敗只記錄在結果中，不影響簽到
@@ -231,6 +252,17 @@ mod tests {
         // UTC 2026-10-19T15:59:59Z 即北京时间 2026-10-19 23:59:59，仍是 10-19
         assert_eq!(cn_date_of(1_792_425_599), "2026-10-19");
         assert_eq!(cn_date_of(1_792_425_600), "2026-10-20");
+    }
+
+    #[test]
+    fn builds_subscription_urls_like_console() {
+        let data = json!({ "configureId": 1001, "code": "aaaaaaa", "port": 2002, "hashed": "bbbbbbbbbbbbbbbb" });
+        let urls = subscription_urls(&data);
+        let get = |name: &str| urls.iter().find(|(n, _)| *n == name).map(|(_, u)| u.as_str());
+        assert_eq!(get("Mihomo / Clash Meta"), Some("https://update.glados-config.com/mihomo/1001/aaaaaaa/2002/glados.yaml"));
+        assert_eq!(get("Singbox"), Some("https://update.glados-config.com/singbox/1001/bbbbbbbbbbbbbbbb"));
+        assert_eq!(urls.len(), 2);
+        assert!(subscription_urls(&json!({ "configureId": 1 })).is_empty());
     }
 
     #[test]

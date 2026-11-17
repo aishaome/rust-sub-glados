@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # UTC 02:00 每天一次，即北京时间 10:00，之后再随机延迟 0 ~ 4 小时，签到时间落在 10:00 ~ 14:00 之间
-    - cron: "0 2 * * *"
+    #- cron: "0 2 * * *"
 
 permissions:
   contents: read
